@@ -25,6 +25,9 @@ app.add_middleware(
 
 BASE_DIR = "/tmp/video_processing"
 
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+CHUNK_SIZE = 1024 * 1024  # 1 MB
+
 BASE_CENTER_X = 605
 BASE_CENTER_Y = 1165
 
@@ -79,9 +82,16 @@ async def process_video(
         )
 
     job_id = str(uuid.uuid4())
-    job_dir = os.path.join(BASE_DIR, job_id)
 
-    os.makedirs(job_dir, exist_ok=True)
+    job_dir = os.path.join(
+        BASE_DIR,
+        job_id
+    )
+
+    os.makedirs(
+        job_dir,
+        exist_ok=True
+    )
 
     input_path = os.path.join(
         job_dir,
@@ -100,16 +110,44 @@ async def process_video(
 
     try:
 
-        # Save uploaded video
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(
-                video.file,
-                buffer
-            )
+        # Save upload in small chunks
+        total_size = 0
 
-        cap = cv2.VideoCapture(input_path)
+        with open(
+            input_path,
+            "wb"
+        ) as buffer:
+
+            while True:
+
+                chunk = await video.read(
+                    CHUNK_SIZE
+                )
+
+                if not chunk:
+                    break
+
+                total_size += len(chunk)
+
+                if total_size > MAX_FILE_SIZE:
+
+                    cleanup_job(job_dir)
+
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Video is too large. Maximum allowed size is 100 MB."
+                    )
+
+                buffer.write(chunk)
+
+        await video.close()
+
+        cap = cv2.VideoCapture(
+            input_path
+        )
 
         if not cap.isOpened():
+
             cleanup_job(job_dir)
 
             raise HTTPException(
@@ -155,7 +193,7 @@ async def process_video(
             BASE_AXES_Y * scale_y
         )
 
-        # Create watermark mask
+        # Watermark mask
         mask = np.zeros(
             (height, width),
             dtype=np.uint8
@@ -172,7 +210,7 @@ async def process_video(
             -1
         )
 
-        # Small processing area
+        # Small ROI around watermark
         padding = 25
 
         x1 = max(
@@ -200,7 +238,6 @@ async def process_video(
             x1:x2
         ]
 
-        # Video writer
         fourcc = cv2.VideoWriter_fourcc(
             *"mp4v"
         )
@@ -292,7 +329,7 @@ async def process_video(
         cap.release()
         out.release()
 
-        # Restore original audio
+        # Add original audio
         ffmpeg_command = [
             "ffmpeg",
             "-y",
@@ -336,7 +373,6 @@ async def process_video(
                 detail="FFmpeg processing failed"
             )
 
-        # Delete files AFTER the response is sent
         cleanup_task = BackgroundTask(
             cleanup_job,
             job_dir
