@@ -8,6 +8,7 @@ import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 
 app = FastAPI(title="Video Processing API")
@@ -39,6 +40,14 @@ def home():
     }
 
 
+def cleanup_job(job_dir):
+    try:
+        if os.path.exists(job_dir):
+            shutil.rmtree(job_dir)
+    except Exception:
+        pass
+
+
 @app.post("/process")
 async def process_video(
     video: UploadFile = File(...),
@@ -53,7 +62,12 @@ async def process_video(
             detail="Mode must be blur or reconstruction"
         )
 
-    allowed_extensions = [".mp4", ".mov", ".webm", ".mkv"]
+    allowed_extensions = [
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv"
+    ]
 
     filename = video.filename or "video.mp4"
     extension = os.path.splitext(filename)[1].lower()
@@ -69,44 +83,83 @@ async def process_video(
 
     os.makedirs(job_dir, exist_ok=True)
 
-    input_path = os.path.join(job_dir, "input_video.mp4")
-    silent_path = os.path.join(job_dir, "processed_silent.mp4")
-    final_path = os.path.join(job_dir, "final_video.mp4")
+    input_path = os.path.join(
+        job_dir,
+        "input_video.mp4"
+    )
+
+    silent_path = os.path.join(
+        job_dir,
+        "processed_silent.mp4"
+    )
+
+    final_path = os.path.join(
+        job_dir,
+        "final_video.mp4"
+    )
 
     try:
 
         # Save uploaded video
         with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(video.file, buffer)
+            shutil.copyfileobj(
+                video.file,
+                buffer
+            )
 
         cap = cv2.VideoCapture(input_path)
 
         if not cap.isOpened():
+            cleanup_job(job_dir)
+
             raise HTTPException(
                 status_code=400,
                 detail="Could not open video"
             )
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(
+            cap.get(
+                cv2.CAP_PROP_FRAME_WIDTH
+            )
+        )
+
+        height = int(
+            cap.get(
+                cv2.CAP_PROP_FRAME_HEIGHT
+            )
+        )
+
+        fps = cap.get(
+            cv2.CAP_PROP_FPS
+        )
 
         if fps <= 0:
             fps = 24
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
         scale_x = width / 720.0
         scale_y = height / 1280.0
 
-        center_x = int(BASE_CENTER_X * scale_x)
-        center_y = int(BASE_CENTER_Y * scale_y)
+        center_x = int(
+            BASE_CENTER_X * scale_x
+        )
 
-        axes_x = int(BASE_AXES_X * scale_x)
-        axes_y = int(BASE_AXES_Y * scale_y)
+        center_y = int(
+            BASE_CENTER_Y * scale_y
+        )
 
-        # Create full mask
-        mask = np.zeros((height, width), dtype=np.uint8)
+        axes_x = int(
+            BASE_AXES_X * scale_x
+        )
+
+        axes_y = int(
+            BASE_AXES_Y * scale_y
+        )
+
+        # Create watermark mask
+        mask = np.zeros(
+            (height, width),
+            dtype=np.uint8
+        )
 
         cv2.ellipse(
             mask,
@@ -119,19 +172,38 @@ async def process_video(
             -1
         )
 
-        # Small ROI around watermark
+        # Small processing area
         padding = 25
 
-        x1 = max(center_x - axes_x - padding, 0)
-        y1 = max(center_y - axes_y - padding, 0)
+        x1 = max(
+            center_x - axes_x - padding,
+            0
+        )
 
-        x2 = min(center_x + axes_x + padding, width)
-        y2 = min(center_y + axes_y + padding, height)
+        y1 = max(
+            center_y - axes_y - padding,
+            0
+        )
 
-        roi_mask = mask[y1:y2, x1:x2]
+        x2 = min(
+            center_x + axes_x + padding,
+            width
+        )
+
+        y2 = min(
+            center_y + axes_y + padding,
+            height
+        )
+
+        roi_mask = mask[
+            y1:y2,
+            x1:x2
+        ]
 
         # Video writer
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(
+            *"mp4v"
+        )
 
         out = cv2.VideoWriter(
             silent_path,
@@ -141,13 +213,14 @@ async def process_video(
         )
 
         if not out.isOpened():
+
             cap.release()
+            cleanup_job(job_dir)
+
             raise HTTPException(
                 status_code=500,
                 detail="Could not create output video"
             )
-
-        processed = 0
 
         while True:
 
@@ -156,11 +229,13 @@ async def process_video(
             if not ret:
                 break
 
-            roi = frame[y1:y2, x1:x2]
+            roi = frame[
+                y1:y2,
+                x1:x2
+            ]
 
             if mode == "reconstruction":
 
-                # Reconstruct only the small watermark area
                 repaired_roi = cv2.inpaint(
                     roi,
                     roi_mask,
@@ -168,11 +243,13 @@ async def process_video(
                     cv2.INPAINT_TELEA
                 )
 
-                frame[y1:y2, x1:x2] = repaired_roi
+                frame[
+                    y1:y2,
+                    x1:x2
+                ] = repaired_roi
 
             else:
 
-                # Blur mode
                 soft_mask = cv2.GaussianBlur(
                     roi_mask,
                     (15, 15),
@@ -186,26 +263,36 @@ async def process_video(
                 )
 
                 mask_float = (
-                    soft_mask.astype(np.float32) / 255.0
+                    soft_mask.astype(
+                        np.float32
+                    ) / 255.0
                 )
 
-                mask_float = mask_float[:, :, np.newaxis]
+                mask_float = mask_float[
+                    :,
+                    :,
+                    np.newaxis
+                ]
 
                 repaired_roi = (
-                    roi.astype(np.float32) * (1 - mask_float)
-                    + blurred_roi.astype(np.float32) * mask_float
+                    roi.astype(np.float32)
+                    * (1 - mask_float)
+                    +
+                    blurred_roi.astype(np.float32)
+                    * mask_float
                 ).astype(np.uint8)
 
-                frame[y1:y2, x1:x2] = repaired_roi
+                frame[
+                    y1:y2,
+                    x1:x2
+                ] = repaired_roi
 
             out.write(frame)
-
-            processed += 1
 
         cap.release()
         out.release()
 
-        # Add original audio back
+        # Restore original audio
         ffmpeg_command = [
             "ffmpeg",
             "-y",
@@ -241,21 +328,34 @@ async def process_video(
         )
 
         if result.returncode != 0:
+
+            cleanup_job(job_dir)
+
             raise HTTPException(
                 status_code=500,
                 detail="FFmpeg processing failed"
             )
 
+        # Delete files AFTER the response is sent
+        cleanup_task = BackgroundTask(
+            cleanup_job,
+            job_dir
+        )
+
         return FileResponse(
             final_path,
             media_type="video/mp4",
-            filename="processed_video.mp4"
+            filename="processed_video.mp4",
+            background=cleanup_task
         )
 
     except HTTPException:
         raise
 
     except Exception as e:
+
+        cleanup_job(job_dir)
+
         raise HTTPException(
             status_code=500,
             detail=str(e)
