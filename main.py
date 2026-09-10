@@ -5,7 +5,7 @@ import subprocess
 import cv2
 import numpy as np
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -13,7 +13,10 @@ from fastapi.responses import FileResponse
 app = FastAPI(title="Video Processing API")
 
 
-# Blogger se API request allow karne ke liye
+# =====================================================
+# CORS
+# =====================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,27 +26,76 @@ app.add_middleware(
 )
 
 
+# =====================================================
+# SETTINGS
+# =====================================================
+
 BASE_DIR = "/tmp/video_processing"
 
 os.makedirs(BASE_DIR, exist_ok=True)
 
 
+# Gemini visible logo position
+# Tested with the current 720x1280 videos.
+
+BASE_CENTER_X = 605
+BASE_CENTER_Y = 1165
+
+BASE_AXES_X = 50
+BASE_AXES_Y = 48
+
+
+# =====================================================
+# HOME
+# =====================================================
+
 @app.get("/")
 def home():
+
     return {
         "status": "online",
         "message": "Video Processing API is running"
     }
 
 
+# =====================================================
+# PROCESS VIDEO
+# =====================================================
+
 @app.post("/process")
-async def process_video(video: UploadFile = File(...)):
+async def process_video(
+    video: UploadFile = File(...),
+    mode: str = Form("reconstruction")
+):
 
     if not video.filename:
+
         raise HTTPException(
             status_code=400,
             detail="No video file provided."
         )
+
+
+    # -------------------------------------------------
+    # Allowed modes
+    # -------------------------------------------------
+
+    mode = mode.lower().strip()
+
+    if mode not in [
+        "blur",
+        "reconstruction"
+    ]:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid processing mode. Use blur or reconstruction."
+        )
+
+
+    # -------------------------------------------------
+    # Allowed video extensions
+    # -------------------------------------------------
 
     allowed_extensions = (
         ".mp4",
@@ -54,21 +106,33 @@ async def process_video(video: UploadFile = File(...)):
 
     filename_lower = video.filename.lower()
 
-    if not filename_lower.endswith(allowed_extensions):
+    if not filename_lower.endswith(
+        allowed_extensions
+    ):
+
         raise HTTPException(
             status_code=400,
             detail="Unsupported video format."
         )
 
 
-    job_id = str(uuid.uuid4())
+    # -------------------------------------------------
+    # Create job directory
+    # -------------------------------------------------
+
+    job_id = str(
+        uuid.uuid4()
+    )
 
     job_dir = os.path.join(
         BASE_DIR,
         job_id
     )
 
-    os.makedirs(job_dir, exist_ok=True)
+    os.makedirs(
+        job_dir,
+        exist_ok=True
+    )
 
 
     input_video = os.path.join(
@@ -89,8 +153,14 @@ async def process_video(video: UploadFile = File(...)):
 
     try:
 
-        # Save uploaded video
-        with open(input_video, "wb") as buffer:
+        # =================================================
+        # SAVE UPLOADED VIDEO
+        # =================================================
+
+        with open(
+            input_video,
+            "wb"
+        ) as buffer:
 
             shutil.copyfileobj(
                 video.file,
@@ -98,12 +168,17 @@ async def process_video(video: UploadFile = File(...)):
             )
 
 
-        # Open video
+        # =================================================
+        # OPEN VIDEO
+        # =================================================
+
         cap = cv2.VideoCapture(
             input_video
         )
 
+
         if not cap.isOpened():
+
             raise HTTPException(
                 status_code=400,
                 detail="Could not open video."
@@ -134,10 +209,95 @@ async def process_video(video: UploadFile = File(...)):
 
 
         if fps <= 0:
+
             fps = 24
 
 
-        # H.264 output
+        if width <= 0 or height <= 0:
+
+            cap.release()
+
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid video dimensions."
+            )
+
+
+        # =================================================
+        # SCALE MASK FOR VIDEO SIZE
+        # =================================================
+
+        # Our tested coordinates are based on
+        # a 720x1280 video.
+
+        scale_x = width / 720.0
+        scale_y = height / 1280.0
+
+
+        center_x = int(
+            BASE_CENTER_X * scale_x
+        )
+
+        center_y = int(
+            BASE_CENTER_Y * scale_y
+        )
+
+        axes_x = max(
+            10,
+            int(BASE_AXES_X * scale_x)
+        )
+
+        axes_y = max(
+            10,
+            int(BASE_AXES_Y * scale_y)
+        )
+
+
+        # Keep coordinates inside video
+
+        center_x = min(
+            max(center_x, 0),
+            width - 1
+        )
+
+        center_y = min(
+            max(center_y, 0),
+            height - 1
+        )
+
+
+        # =================================================
+        # CREATE MASK ONCE
+        # =================================================
+
+        mask = np.zeros(
+            (height, width),
+            dtype=np.uint8
+        )
+
+
+        cv2.ellipse(
+            mask,
+            (
+                center_x,
+                center_y
+            ),
+            (
+                axes_x,
+                axes_y
+            ),
+            0,
+            0,
+            360,
+            255,
+            -1
+        )
+
+
+        # =================================================
+        # VIDEO WRITER
+        # =================================================
+
         fourcc = cv2.VideoWriter_fourcc(
             *"mp4v"
         )
@@ -150,16 +310,19 @@ async def process_video(video: UploadFile = File(...)):
         )
 
 
-        # Confirmed mask position
-        #
-        # These coordinates are based on
-        # the test video used during development.
-        center_x = 605
-        center_y = 1165
+        if not out.isOpened():
 
-        axes_x = 42
-        axes_y = 40
+            cap.release()
 
+            raise HTTPException(
+                status_code=500,
+                detail="Could not create output video."
+            )
+
+
+        # =================================================
+        # PROCESS FRAMES
+        # =================================================
 
         frame_number = 0
 
@@ -169,80 +332,79 @@ async def process_video(video: UploadFile = File(...)):
             success, frame = cap.read()
 
             if not success:
+
                 break
 
 
-            # Create small elliptical mask
-            mask = np.zeros(
-                (height, width),
-                dtype=np.uint8
-            )
+            # =================================================
+            # MODE 1: BLUR
+            # =================================================
+
+            if mode == "blur":
+
+                # Soft mask edge
+                soft_mask = cv2.GaussianBlur(
+                    mask,
+                    (15, 15),
+                    0
+                )
 
 
-            # Keep coordinates inside video
-            safe_x = min(
-                max(center_x, 0),
-                width - 1
-            )
-
-            safe_y = min(
-                max(center_y, 0),
-                height - 1
-            )
+                blurred = cv2.GaussianBlur(
+                    frame,
+                    (31, 31),
+                    0
+                )
 
 
-            cv2.ellipse(
-                mask,
-                (
-                    safe_x,
-                    safe_y
-                ),
-                (
-                    axes_x,
-                    axes_y
-                ),
-                0,
-                0,
-                360,
-                255,
-                -1
-            )
+                mask_float = (
+                    soft_mask.astype(
+                        np.float32
+                    ) / 255.0
+                )
 
 
-            # Slight feathering
-            mask = cv2.GaussianBlur(
-                mask,
-                (15, 15),
-                0
-            )
+                mask_float = mask_float[
+                    :, :, np.newaxis
+                ]
 
 
-            # Blur only the selected area
-            blurred = cv2.GaussianBlur(
-                frame,
-                (31, 31),
-                0
-            )
-
-
-            mask_float = (
-                mask.astype(np.float32)
-                / 255.0
-            )
-
-
-            for channel in range(3):
-
-                frame[:, :, channel] = (
-                    frame[:, :, channel]
+                result = (
+                    frame.astype(
+                        np.float32
+                    )
                     * (1.0 - mask_float)
                     +
-                    blurred[:, :, channel]
+                    blurred.astype(
+                        np.float32
+                    )
                     * mask_float
-                ).astype(np.uint8)
+                ).astype(
+                    np.uint8
+                )
 
 
-            out.write(frame)
+            # =================================================
+            # MODE 2: RECONSTRUCTION / INPAINTING
+            # =================================================
+
+            else:
+
+                result = cv2.inpaint(
+                    frame,
+                    mask,
+                    5,
+                    cv2.INPAINT_TELEA
+                )
+
+
+            # =================================================
+            # WRITE FRAME
+            # =================================================
+
+            out.write(
+                result
+            )
 
 
             frame_number += 1
@@ -252,9 +414,28 @@ async def process_video(video: UploadFile = File(...)):
         out.release()
 
 
-        # Add original audio back
+        # =================================================
+        # CHECK SILENT VIDEO
+        # =================================================
+
+        if not os.path.exists(
+            silent_video
+        ):
+
+            raise HTTPException(
+                status_code=500,
+                detail="Processed video was not created."
+            )
+
+
+        # =================================================
+        # ADD ORIGINAL AUDIO
+        # =================================================
+
         ffmpeg_command = [
+
             "ffmpeg",
+
             "-y",
 
             "-i",
@@ -276,7 +457,7 @@ async def process_video(video: UploadFile = File(...)):
             "veryfast",
 
             "-crf",
-            "20",
+            "18",
 
             "-c:a",
             "aac",
@@ -305,24 +486,36 @@ async def process_video(video: UploadFile = File(...)):
             )
 
 
+        # =================================================
+        # CHECK FINAL VIDEO
+        # =================================================
+
         if not os.path.exists(
             final_video
         ):
 
             raise HTTPException(
                 status_code=500,
-                detail="Output video was not created."
+                detail="Final video was not created."
             )
 
 
+        # =================================================
+        # RETURN VIDEO
+        # =================================================
+
         return FileResponse(
+
             final_video,
+
             media_type="video/mp4",
+
             filename="processed-video.mp4"
         )
 
 
     except HTTPException:
+
         raise
 
 
@@ -336,7 +529,7 @@ async def process_video(video: UploadFile = File(...)):
 
     finally:
 
-        # Temporary cleanup is intentionally
-        # omitted here because FileResponse
-        # needs the output file to remain available.
+        # FileResponse needs the final file
+        # to remain available while downloading.
+
         pass
