@@ -13,10 +13,6 @@ from fastapi.responses import FileResponse
 app = FastAPI(title="Video Processing API")
 
 
-# =====================================================
-# CORS
-# =====================================================
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,17 +22,7 @@ app.add_middleware(
 )
 
 
-# =====================================================
-# SETTINGS
-# =====================================================
-
 BASE_DIR = "/tmp/video_processing"
-
-os.makedirs(BASE_DIR, exist_ok=True)
-
-
-# Gemini visible logo position
-# Tested with the current 720x1280 videos.
 
 BASE_CENTER_X = 605
 BASE_CENTER_Y = 1165
@@ -45,22 +31,13 @@ BASE_AXES_X = 50
 BASE_AXES_Y = 48
 
 
-# =====================================================
-# HOME
-# =====================================================
-
 @app.get("/")
 def home():
-
     return {
         "status": "online",
         "message": "Video Processing API is running"
     }
 
-
-# =====================================================
-# PROCESS VIDEO
-# =====================================================
 
 @app.post("/process")
 async def process_video(
@@ -68,224 +45,73 @@ async def process_video(
     mode: str = Form("reconstruction")
 ):
 
-    if not video.filename:
-
-        raise HTTPException(
-            status_code=400,
-            detail="No video file provided."
-        )
-
-
-    # -------------------------------------------------
-    # Allowed modes
-    # -------------------------------------------------
-
     mode = mode.lower().strip()
 
-    if mode not in [
-        "blur",
-        "reconstruction"
-    ]:
-
+    if mode not in ["blur", "reconstruction"]:
         raise HTTPException(
             status_code=400,
-            detail="Invalid processing mode. Use blur or reconstruction."
+            detail="Mode must be blur or reconstruction"
         )
 
+    allowed_extensions = [".mp4", ".mov", ".webm", ".mkv"]
 
-    # -------------------------------------------------
-    # Allowed video extensions
-    # -------------------------------------------------
+    filename = video.filename or "video.mp4"
+    extension = os.path.splitext(filename)[1].lower()
 
-    allowed_extensions = (
-        ".mp4",
-        ".mov",
-        ".webm",
-        ".mkv"
-    )
-
-    filename_lower = video.filename.lower()
-
-    if not filename_lower.endswith(
-        allowed_extensions
-    ):
-
+    if extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported video format."
+            detail="Unsupported video format"
         )
 
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(BASE_DIR, job_id)
 
-    # -------------------------------------------------
-    # Create job directory
-    # -------------------------------------------------
+    os.makedirs(job_dir, exist_ok=True)
 
-    job_id = str(
-        uuid.uuid4()
-    )
-
-    job_dir = os.path.join(
-        BASE_DIR,
-        job_id
-    )
-
-    os.makedirs(
-        job_dir,
-        exist_ok=True
-    )
-
-
-    input_video = os.path.join(
-        job_dir,
-        "input_video.mp4"
-    )
-
-    silent_video = os.path.join(
-        job_dir,
-        "processed_silent.mp4"
-    )
-
-    final_video = os.path.join(
-        job_dir,
-        "final_video.mp4"
-    )
-
+    input_path = os.path.join(job_dir, "input_video.mp4")
+    silent_path = os.path.join(job_dir, "processed_silent.mp4")
+    final_path = os.path.join(job_dir, "final_video.mp4")
 
     try:
 
-        # =================================================
-        # SAVE UPLOADED VIDEO
-        # =================================================
+        # Save uploaded video
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(video.file, buffer)
 
-        with open(
-            input_video,
-            "wb"
-        ) as buffer:
-
-            shutil.copyfileobj(
-                video.file,
-                buffer
-            )
-
-
-        # =================================================
-        # OPEN VIDEO
-        # =================================================
-
-        cap = cv2.VideoCapture(
-            input_video
-        )
-
+        cap = cv2.VideoCapture(input_path)
 
         if not cap.isOpened():
-
             raise HTTPException(
                 status_code=400,
-                detail="Could not open video."
+                detail="Could not open video"
             )
 
-
-        fps = cap.get(
-            cv2.CAP_PROP_FPS
-        )
-
-        width = int(
-            cap.get(
-                cv2.CAP_PROP_FRAME_WIDTH
-            )
-        )
-
-        height = int(
-            cap.get(
-                cv2.CAP_PROP_FRAME_HEIGHT
-            )
-        )
-
-        total_frames = int(
-            cap.get(
-                cv2.CAP_PROP_FRAME_COUNT
-            )
-        )
-
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
 
         if fps <= 0:
-
             fps = 24
 
-
-        if width <= 0 or height <= 0:
-
-            cap.release()
-
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid video dimensions."
-            )
-
-
-        # =================================================
-        # SCALE MASK FOR VIDEO SIZE
-        # =================================================
-
-        # Our tested coordinates are based on
-        # a 720x1280 video.
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         scale_x = width / 720.0
         scale_y = height / 1280.0
 
+        center_x = int(BASE_CENTER_X * scale_x)
+        center_y = int(BASE_CENTER_Y * scale_y)
 
-        center_x = int(
-            BASE_CENTER_X * scale_x
-        )
+        axes_x = int(BASE_AXES_X * scale_x)
+        axes_y = int(BASE_AXES_Y * scale_y)
 
-        center_y = int(
-            BASE_CENTER_Y * scale_y
-        )
-
-        axes_x = max(
-            10,
-            int(BASE_AXES_X * scale_x)
-        )
-
-        axes_y = max(
-            10,
-            int(BASE_AXES_Y * scale_y)
-        )
-
-
-        # Keep coordinates inside video
-
-        center_x = min(
-            max(center_x, 0),
-            width - 1
-        )
-
-        center_y = min(
-            max(center_y, 0),
-            height - 1
-        )
-
-
-        # =================================================
-        # CREATE MASK ONCE
-        # =================================================
-
-        mask = np.zeros(
-            (height, width),
-            dtype=np.uint8
-        )
-
+        # Create full mask
+        mask = np.zeros((height, width), dtype=np.uint8)
 
         cv2.ellipse(
             mask,
-            (
-                center_x,
-                center_y
-            ),
-            (
-                axes_x,
-                axes_y
-            ),
+            (center_x, center_y),
+            (axes_x, axes_y),
             0,
             0,
             360,
@@ -293,243 +119,144 @@ async def process_video(
             -1
         )
 
+        # Small ROI around watermark
+        padding = 25
 
-        # =================================================
-        # VIDEO WRITER
-        # =================================================
+        x1 = max(center_x - axes_x - padding, 0)
+        y1 = max(center_y - axes_y - padding, 0)
 
-        fourcc = cv2.VideoWriter_fourcc(
-            *"mp4v"
-        )
+        x2 = min(center_x + axes_x + padding, width)
+        y2 = min(center_y + axes_y + padding, height)
+
+        roi_mask = mask[y1:y2, x1:x2]
+
+        # Video writer
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
         out = cv2.VideoWriter(
-            silent_video,
+            silent_path,
             fourcc,
             fps,
             (width, height)
         )
 
-
         if not out.isOpened():
-
             cap.release()
-
             raise HTTPException(
                 status_code=500,
-                detail="Could not create output video."
+                detail="Could not create output video"
             )
 
-
-        # =================================================
-        # PROCESS FRAMES
-        # =================================================
-
-        frame_number = 0
-
+        processed = 0
 
         while True:
 
-            success, frame = cap.read()
+            ret, frame = cap.read()
 
-            if not success:
-
+            if not ret:
                 break
 
+            roi = frame[y1:y2, x1:x2]
 
-            # =================================================
-            # MODE 1: BLUR
-            # =================================================
+            if mode == "reconstruction":
 
-            if mode == "blur":
-
-                # Soft mask edge
-                soft_mask = cv2.GaussianBlur(
-                    mask,
-                    (15, 15),
-                    0
-                )
-
-
-                blurred = cv2.GaussianBlur(
-                    frame,
-                    (31, 31),
-                    0
-                )
-
-
-                mask_float = (
-                    soft_mask.astype(
-                        np.float32
-                    ) / 255.0
-                )
-
-
-                mask_float = mask_float[
-                    :, :, np.newaxis
-                ]
-
-
-                result = (
-                    frame.astype(
-                        np.float32
-                    )
-                    * (1.0 - mask_float)
-                    +
-                    blurred.astype(
-                        np.float32
-                    )
-                    * mask_float
-                ).astype(
-                    np.uint8
-                )
-
-
-            # =================================================
-            # MODE 2: RECONSTRUCTION / INPAINTING
-            # =================================================
-
-            else:
-
-                result = cv2.inpaint(
-                    frame,
-                    mask,
+                # Reconstruct only the small watermark area
+                repaired_roi = cv2.inpaint(
+                    roi,
+                    roi_mask,
                     5,
                     cv2.INPAINT_TELEA
                 )
 
+                frame[y1:y2, x1:x2] = repaired_roi
 
-            # =================================================
-            # WRITE FRAME
-            # =================================================
+            else:
 
-            out.write(
-                result
-            )
+                # Blur mode
+                soft_mask = cv2.GaussianBlur(
+                    roi_mask,
+                    (15, 15),
+                    0
+                )
 
+                blurred_roi = cv2.GaussianBlur(
+                    roi,
+                    (31, 31),
+                    0
+                )
 
-            frame_number += 1
+                mask_float = (
+                    soft_mask.astype(np.float32) / 255.0
+                )
 
+                mask_float = mask_float[:, :, np.newaxis]
+
+                repaired_roi = (
+                    roi.astype(np.float32) * (1 - mask_float)
+                    + blurred_roi.astype(np.float32) * mask_float
+                ).astype(np.uint8)
+
+                frame[y1:y2, x1:x2] = repaired_roi
+
+            out.write(frame)
+
+            processed += 1
 
         cap.release()
         out.release()
 
-
-        # =================================================
-        # CHECK SILENT VIDEO
-        # =================================================
-
-        if not os.path.exists(
-            silent_video
-        ):
-
-            raise HTTPException(
-                status_code=500,
-                detail="Processed video was not created."
-            )
-
-
-        # =================================================
-        # ADD ORIGINAL AUDIO
-        # =================================================
-
+        # Add original audio back
         ffmpeg_command = [
-
             "ffmpeg",
-
             "-y",
-
             "-i",
-            silent_video,
-
+            silent_path,
             "-i",
-            input_video,
-
+            input_path,
             "-map",
             "0:v:0",
-
             "-map",
             "1:a:0?",
-
             "-c:v",
             "libx264",
-
             "-preset",
-            "veryfast",
-
+            "ultrafast",
             "-crf",
-            "18",
-
+            "20",
+            "-threads",
+            "1",
             "-c:a",
             "aac",
-
             "-b:a",
             "128k",
-
             "-shortest",
-
-            final_video
+            final_path
         ]
-
 
         result = subprocess.run(
             ffmpeg_command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True
         )
 
-
         if result.returncode != 0:
-
             raise HTTPException(
                 status_code=500,
-                detail="FFmpeg processing failed."
+                detail="FFmpeg processing failed"
             )
-
-
-        # =================================================
-        # CHECK FINAL VIDEO
-        # =================================================
-
-        if not os.path.exists(
-            final_video
-        ):
-
-            raise HTTPException(
-                status_code=500,
-                detail="Final video was not created."
-            )
-
-
-        # =================================================
-        # RETURN VIDEO
-        # =================================================
 
         return FileResponse(
-
-            final_video,
-
+            final_path,
             media_type="video/mp4",
-
-            filename="processed-video.mp4"
+            filename="processed_video.mp4"
         )
 
-
     except HTTPException:
-
         raise
 
-
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
             detail=str(e)
         )
-
-
-    finally:
-
-        # FileResponse needs the final file
-        # to remain available while downloading.
-
-        pass
